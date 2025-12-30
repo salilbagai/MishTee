@@ -1,0 +1,120 @@
+import gradio as gr
+import pandas as pd
+import requests
+from supabase import create_client, Client
+
+# --- 1. ASSETS & CREDENTIALS ---
+SUPABASE_URL = "https://djfqnciwsbndnsvimsyv.supabase.co"
+SUPABASE_KEY = "sb_publishable_qbfSfu5eUKPxvrU45jIPnA_VRl6RoS0"
+LOGO_URL = "https://github.com/salilbagai/MishTee/blob/main/Mishtee_Logo.png?raw=true"
+CSS_URL = "https://raw.githubusercontent.com/salilbagai/MishTee/refs/heads/main/style.css"
+
+# Initialize Supabase
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Fetch custom CSS from your repository
+try:
+    response = requests.get(CSS_URL)
+    mishtee_css = response.text if response.status_code == 200 else ""
+except:
+    mishtee_css = ""
+
+# --- 2. CORE LOGIC FUNCTIONS ---
+
+def get_customer_data(phone_number):
+    """Fetches greeting and order history for the login event."""
+    if not phone_number or len(phone_number) < 10:
+        return "Please enter a valid phone number.", pd.DataFrame()
+
+    # Get Customer Name
+    cust_res = supabase.table("customers").select("full_name").eq("phone", phone_number).execute()
+    
+    if not cust_res.data:
+        greeting = "Namaste! Welcome to MishTee-Magic. Please register to view history."
+        orders_df = pd.DataFrame()
+    else:
+        name = cust_res.data[0]['full_name']
+        greeting = f"## Namaste, {name} ji! \nGreat to see you again."
+        
+        # Get Order History
+        order_res = supabase.table("orders").select(
+            "order_id, order_date, qty_kg, order_value_inr, status, products(sweet_name, variant_type)"
+        ).eq("cust_phone", phone_number).execute()
+
+        if order_res.data:
+            flat_orders = []
+            for o in order_res.data:
+                flat_orders.append({
+                    "Order ID": o['order_id'],
+                    "Date": o['order_date'],
+                    "Item": f"{o['products']['sweet_name']} ({o['products']['variant_type']})",
+                    "Qty (kg)": o['qty_kg'],
+                    "Value (₹)": o['order_value_inr'],
+                    "Status": o['status']
+                })
+            orders_df = pd.DataFrame(flat_orders)
+        else:
+            orders_df = pd.DataFrame(columns=["No orders found"])
+
+    # Get Trending Data for the same trigger
+    trending_df = get_trending_products()
+    
+    return greeting, orders_df, trending_df
+
+def get_trending_products():
+    """Retrieves top 4 products by volume."""
+    res = supabase.table("orders").select("qty_kg, products(sweet_name, variant_type, price_per_kg)").execute()
+    if not res.data:
+        return pd.DataFrame()
+
+    df = pd.json_normalize(res.data)
+    trending = df.groupby(['products.sweet_name', 'products.variant_type', 'products.price_per_kg'])['qty_kg'].sum().reset_index()
+    trending = trending.sort_values(by='qty_kg', ascending=False).head(4)
+    trending.columns = ["Sweet Name", "Type", "Price (₹/kg)", "Total Sold (kg)"]
+    return trending
+
+# --- 3. GRADIO UI LAYOUT ---
+
+with gr.Blocks(css=mishtee_css, title="MishTee-Magic | Artisanal Sweets") as app:
+    
+    # Header Section
+    with gr.Column(elem_id="header_container"):
+        gr.Image(LOGO_URL, show_label=False, container=False, width=280, elem_id="logo")
+        gr.Markdown("<p style='text-align:center; letter-spacing: 2px; color: #C06C5C;'>PURITY AND HEALTH IN EVERY BITE</p>")
+    
+    gr.HTML("<div style='margin: 20px 0; border-bottom: 1px solid #eee;'></div>")
+
+    # Login Row
+    with gr.Row():
+        with gr.Column(scale=3):
+            phone_input = gr.Textbox(label="Customer Phone", placeholder="9XXXXXXXXX", max_lines=1)
+        with gr.Column(scale=1):
+            login_btn = gr.Button("ENTER THE MAGIC", variant="primary")
+
+    # Dynamic Greeting Area
+    greeting_output = gr.Markdown("Welcome. Please log in to view your personalized collection.")
+
+    # Data Tabs
+    with gr.Tabs():
+        with gr.TabItem("My Order History"):
+            history_table = gr.Dataframe(interactive=False)
+        
+        with gr.TabItem("Trending Today"):
+            trending_table = gr.Dataframe(interactive=False)
+
+    # Event Trigger
+    login_btn.click(
+        fn=get_customer_data,
+        inputs=[phone_input],
+        outputs=[greeting_output, history_table, trending_table]
+    )
+
+    # Footer
+    gr.Markdown(
+        "<footer style='text-align:center; padding-top: 50px; opacity: 0.5; font-size: 12px;'>"
+        "© 2024 MishTee-Magic | A2 Milk & Organic Artisanal Confections"
+        "</footer>"
+    )
+
+if __name__ == "__main__":
+    app.launch()
